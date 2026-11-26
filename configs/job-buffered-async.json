@@ -1,0 +1,17 @@
+{
+  "suite": "job-buffered",
+  "seed": 1,
+  "seeds": 1,
+  "fifo": "chan",
+  "chan_cap": 512,
+  "log_enabled": false,
+  "log_level": "info",
+  "check_determinism": true,
+  "params": {
+    "handler": "async",
+    "capacity": 3,
+    "bursts": 10,
+    "burst_size": 8,
+    "gap_ms": 4
+  }
+}

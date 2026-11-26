@@ -1,0 +1,47 @@
+# Build output
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test / coverage / profiling artifacts
+*.test
+*.out
+coverage.*
+*.coverprofile
+*.prof
+*.pprof
+cpu.pprof
+mem.pprof
+go.work
+go.work.sum
+
+# Fuzz/rapid failure corpora written at runtime
+testdata/rapid/
+testdata/fuzz/**/cache/
+
+# Suite run outputs (CSV/Prometheus dumps)
+*.csv
+*.prom
+
+# Copyrighted reference material (keep local only)
+docs/*.pdf
+
+# Environment / secrets
+.env
+.env.*
+
+# Editors & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Agent-local settings
+.claude/settings.local.json

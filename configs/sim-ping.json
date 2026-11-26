@@ -1,0 +1,27 @@
+{
+  "suite": "sim-ping",
+  "seed": 1,
+  "seeds": 1,
+  "fifo": "slice",
+  "chan_cap": 512,
+  "log_enabled": true,
+  "log_level": "info",
+  "check_determinism": true,
+  "net": {
+    "min_latency_ms": 2,
+    "max_latency_ms": 15,
+    "drop_ppm": 150000,
+    "dup_ppm": 100000,
+    "max_duplicates": 2
+  },
+  "params": {
+    "nodes": 5,
+    "rounds": 10,
+    "interval_ms": 20,
+    "crash_node": "n2",
+    "crash_at_ms": 60,
+    "recover_at_ms": 140,
+    "partition_at_ms": 40,
+    "gst_at_ms": 120
+  }
+}
