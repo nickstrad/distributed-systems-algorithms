@@ -28,7 +28,7 @@ testdata/fuzz/**/cache/
 *.prom
 
 # Copyrighted reference material (keep local only)
-docs/*.pdf
+docs/**/*.[pP][dD][fF]
 
 # Environment / secrets
 .env
