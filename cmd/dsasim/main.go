@@ -21,10 +21,24 @@ import (
 
 func main() {
 	cmd := newRootCmd(scenario.DefaultRegistry(), os.Stdout, os.Stderr)
+	os.Exit(execute(cmd))
+}
+
+// reportedRunError preserves the cause of a failure already rendered by run.
+type reportedRunError struct{ cause error }
+
+func (e reportedRunError) Error() string { return e.cause.Error() }
+func (e reportedRunError) Unwrap() error { return e.cause }
+
+func execute(cmd *cobra.Command) int {
 	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		var reported reportedRunError
+		if !errors.As(err, &reported) {
+			fmt.Fprintln(cmd.ErrOrStderr(), err)
+		}
+		return 1
 	}
+	return 0
 }
 
 func newRootCmd(reg *scenario.Registry, stdout, stderr io.Writer) *cobra.Command {
@@ -119,7 +133,7 @@ func newRunCmd(reg *scenario.Registry) *cobra.Command {
 						fmt.Fprint(errOut, scenario.FormatStory(res, replay))
 					}
 					printFailure(errOut, cfg, f.configPath, suiteArg, seed, res, err)
-					return err
+					return reportedRunError{cause: err}
 				}
 				if f.story {
 					fmt.Fprint(out, scenario.FormatStory(res, replay))

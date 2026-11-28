@@ -8,6 +8,7 @@ package sim_test
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -728,6 +729,62 @@ func TestDynamicAddNodeAndAddCluster(t *testing.T) {
 	}
 	if clientReplies != 1 {
 		t.Fatalf("clientReplies = %d, want 1", clientReplies)
+	}
+}
+
+func TestAddClusterValidatesBeforeRegistration(t *testing.T) {
+	s := sim.New(sim.Config{})
+	base := func(env.Env) env.Process { return env.BaseProcess{} }
+	if err := s.AddNode("z", []env.NodeID{"z"}, base); err != nil {
+		t.Fatal(err)
+	}
+	digest := s.Digest()
+	calls := 0
+	factory := func(e env.Env) env.Process {
+		calls++
+		return base(e)
+	}
+	if err := s.AddCluster([]env.NodeID{"a", "z"}, factory); !errors.Is(err, env.ErrInvalidArgument) {
+		t.Fatalf("AddCluster with existing peer: got %v, want ErrInvalidArgument", err)
+	}
+	if s.IsAlive("a") || calls != 0 || s.Digest() != digest {
+		t.Fatalf("failed AddCluster changed state: node a alive=%t, factory calls=%d, digest changed=%t",
+			s.IsAlive("a"), calls, s.Digest() != digest)
+	}
+	if err := s.AddCluster([]env.NodeID{"a"}, factory); err != nil {
+		t.Fatalf("retry without existing peer: %v", err)
+	}
+	if err := s.RunUntilQuiet(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Steps() != 2 || calls != 1 {
+		t.Fatalf("got %d init events and %d factory calls, want 2 and 1", s.Steps(), calls)
+	}
+}
+
+func TestNetworkLatencyAcceptsFullDurationRange(t *testing.T) {
+	s := sim.New(sim.Config{Seed: 42, Net: sim.NetConfig{MaxLatency: time.Duration(math.MaxInt64)}})
+	var sentErr error
+	var received bool
+	factory := func(e env.Env) env.Process {
+		return &hookProcess{
+			env: e,
+			onInit: func(e env.Env) {
+				sentErr = e.Net.Send(e.Self, []byte("hello"))
+			},
+			onMsg: func(_ env.Env, from env.NodeID, data []byte) {
+				received = from == "a" && string(data) == "hello"
+			},
+		}
+	}
+	if err := s.AddNode("a", []env.NodeID{"a"}, factory); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunUntilQuiet(); err != nil {
+		t.Fatalf("run with full latency range: %v", err)
+	}
+	if sentErr != nil || !received {
+		t.Fatalf("got send error %v and received=%t, want successful delivery", sentErr, received)
 	}
 }
 

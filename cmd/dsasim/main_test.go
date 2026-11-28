@@ -203,9 +203,15 @@ func TestRunErrorsAndReplay(t *testing.T) {
 	})
 
 	t.Run("unknown_suite", func(t *testing.T) {
-		_, errOut, err := runCLI(t, scenario.DefaultRegistry(), "run", "unknown-suite")
-		if err == nil {
-			t.Fatal("expected error for unknown suite")
+		var stdout, stderr bytes.Buffer
+		cmd := newRootCmd(scenario.DefaultRegistry(), &stdout, &stderr)
+		cmd.SetArgs([]string{"run", "unknown-suite"})
+		if code := execute(cmd); code != 1 {
+			t.Fatalf("execute returned %d, want status 1", code)
+		}
+		errOut := stderr.String()
+		if count := strings.Count(errOut, `unknown suite "unknown-suite"`); count != 1 {
+			t.Fatalf("expected one terminal error, got %d in stderr:\n%s", count, errOut)
 		}
 		if !strings.Contains(errOut, "REPLAY: dsasim run unknown-suite --seed 1") {
 			t.Fatalf("expected REPLAY line in stderr, got:\n%s", errOut)
@@ -214,6 +220,7 @@ func TestRunErrorsAndReplay(t *testing.T) {
 
 	t.Run("execution_failure_prints_trace_and_replay", func(t *testing.T) {
 		reg := scenario.NewRegistry()
+		violation := errors.New("unexpected event")
 		reg.Register(scenario.Suite{
 			Name:        "always-fail",
 			Description: "test suite that fails after emitting a trace event",
@@ -223,15 +230,16 @@ func TestRunErrorsAndReplay(t *testing.T) {
 					return scenario.SuiteOutcome{}, err
 				}
 				s := sim.New(simCfg)
+				s.AddInvariant("event safety", func() error { return violation })
 				s.ScheduleAfter(1, func() {})
-				_ = s.RunUntilQuiet()
-				return scenario.SuiteOutcome{Sim: s}, errors.New("boom invariant violated")
+				return scenario.SuiteOutcome{Sim: s}, s.RunUntilQuiet()
 			},
 		})
 
 		_, errOut, err := runCLI(t, reg, "run", "always-fail", "--seed", "5", "--fifo", "chan", "--chan-cap", "32", "--log")
-		if err == nil {
-			t.Fatal("expected failure from always-fail suite")
+		var invariant *sim.InvariantError
+		if !errors.As(err, &invariant) || !errors.Is(err, violation) || invariant.Seed != 5 || invariant.Step != 1 {
+			t.Fatalf("run error = %v, want the invariant violation on seed 5 step 1", err)
 		}
 		for _, want := range []string{
 			"FAIL suite=always-fail seed=5",

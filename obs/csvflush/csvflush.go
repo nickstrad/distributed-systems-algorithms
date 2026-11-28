@@ -7,6 +7,7 @@
 package csvflush
 
 import (
+	"crypto/rand"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -61,23 +62,25 @@ type Writer struct {
 // schema-version-1 headers to metrics.csv and histograms.csv.
 func New(dir string, run RunInfo) (*Writer, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("csvflush: empty dir")
+		return nil, errors.New("csvflush: empty dir")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("csvflush: create output directory %q: %w", dir, err)
 	}
 	// Remove any leftover run.csv from an earlier run in the same directory so
 	// incomplete runs fail closed.
-	_ = os.Remove(filepath.Join(dir, "run.csv"))
+	if err := os.Remove(filepath.Join(dir, "run.csv")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("csvflush: remove prior completion marker before opening %q: %w", dir, err)
+	}
 
 	mf, err := os.Create(filepath.Join(dir, "metrics.csv"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("csvflush: open metrics data file in %q: %w", dir, err)
 	}
 	hf, err := os.Create(filepath.Join(dir, "histograms.csv"))
 	if err != nil {
 		_ = mf.Close()
-		return nil, err
+		return nil, fmt.Errorf("csvflush: open histogram data file in %q: %w", dir, err)
 	}
 
 	mw := csv.NewWriter(mf)
@@ -129,7 +132,7 @@ func (w *Writer) Export(s obs.Snapshot) error {
 		lj, err := encodeLabelsJSON(p.Labels)
 		if err != nil {
 			w.failed = true
-			return err
+			return fmt.Errorf("csvflush: encode labels for %s.%s at snapshot %d: %w", p.Component, p.Metric, s.Seq, err)
 		}
 		rec := []string{
 			verStr, w.run.RunID, seqStr, tStr, s.Instance,
@@ -138,14 +141,14 @@ func (w *Writer) Export(s obs.Snapshot) error {
 		}
 		if err := w.mCSV.Write(rec); err != nil {
 			w.failed = true
-			return err
+			return fmt.Errorf("csvflush: write %s.%s to metrics.csv at snapshot %d: %w", p.Component, p.Metric, s.Seq, err)
 		}
 	}
 	for _, h := range s.Hists {
 		lj, err := encodeLabelsJSON(h.Labels)
 		if err != nil {
 			w.failed = true
-			return err
+			return fmt.Errorf("csvflush: encode labels for %s.%s at snapshot %d: %w", h.Component, h.Metric, s.Seq, err)
 		}
 		for _, b := range h.Buckets {
 			rec := []string{
@@ -157,7 +160,7 @@ func (w *Writer) Export(s obs.Snapshot) error {
 			}
 			if err := w.hCSV.Write(rec); err != nil {
 				w.failed = true
-				return err
+				return fmt.Errorf("csvflush: write %s.%s to histograms.csv at snapshot %d: %w", h.Component, h.Metric, s.Seq, err)
 			}
 		}
 	}
@@ -165,7 +168,7 @@ func (w *Writer) Export(s obs.Snapshot) error {
 	w.hCSV.Flush()
 	if err := errors.Join(w.mCSV.Error(), w.hCSV.Error()); err != nil {
 		w.failed = true
-		return err
+		return fmt.Errorf("csvflush: flush data files in %q at snapshot %d: %w", w.dir, s.Seq, err)
 	}
 	w.flushes++
 	if s.TimeNs > w.lastT {
@@ -183,19 +186,23 @@ func (w *Writer) Close() error {
 	w.closed = true
 	w.mCSV.Flush()
 	w.hCSV.Flush()
-	err := errors.Join(w.mCSV.Error(), w.hCSV.Error(), w.mFile.Close(), w.hFile.Close())
-	if err != nil || w.failed {
-		return err
+	if err := errors.Join(w.mCSV.Error(), w.hCSV.Error(), w.mFile.Close(), w.hFile.Close()); err != nil {
+		return fmt.Errorf("csvflush: close data files in %q: %w", w.dir, err)
 	}
-	rf, err := os.Create(filepath.Join(w.dir, "run.csv"))
+	if w.failed {
+		return nil
+	}
+
+	// Publish the completion marker only after its contents are fully written.
+	// Use the ordinary CSV creation mode so the process umask also applies
+	// to the renamed marker when other users read this directory.
+	stage := filepath.Join(w.dir, ".run-"+rand.Text()+".csv")
+	rf, err := os.OpenFile(stage, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
 	if err != nil {
-		return err
+		return fmt.Errorf("csvflush: prepare completion marker in %q: %w", w.dir, err)
 	}
+	defer os.Remove(rf.Name())
 	rw := csv.NewWriter(rf)
-	if err := rw.Write(runHeader); err != nil {
-		_ = rf.Close()
-		return err
-	}
 	rec := []string{
 		strconv.Itoa(SchemaVersion),
 		w.run.RunID,
@@ -205,12 +212,13 @@ func (w *Writer) Close() error {
 		strconv.FormatInt(w.flushes, 10),
 		strconv.FormatInt(w.lastT, 10),
 	}
-	if err := rw.Write(rec); err != nil {
-		_ = rf.Close()
-		return err
+	if err := errors.Join(rw.WriteAll([][]string{runHeader, rec}), rf.Close()); err != nil {
+		return fmt.Errorf("csvflush: write completion marker in %q: %w", w.dir, err)
 	}
-	rw.Flush()
-	return errors.Join(rw.Error(), rf.Close())
+	if err := os.Rename(rf.Name(), filepath.Join(w.dir, "run.csv")); err != nil {
+		return fmt.Errorf("csvflush: publish completion marker in %q: %w", w.dir, err)
+	}
+	return nil
 }
 
 // MetricRow is one decoded row from metrics.csv.
@@ -271,15 +279,15 @@ func Read(dir string) (RunData, error) {
 	}
 	seed, err := strconv.ParseInt(r[3], 10, 64)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("csvflush: decode run.csv seed: %w", err)
 	}
 	flushes, err := strconv.ParseInt(r[5], 10, 64)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("csvflush: decode run.csv flushes: %w", err)
 	}
 	durNs, err := strconv.ParseInt(r[6], 10, 64)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("csvflush: decode run.csv duration_ns: %w", err)
 	}
 	out.Run = RunInfo{RunID: r[1], Scenario: r[2], Seed: seed, Instance: r[4]}
 	out.Flushes = flushes
@@ -289,22 +297,25 @@ func Read(dir string) (RunData, error) {
 	if err != nil {
 		return out, err
 	}
-	for _, row := range mRows {
+	for i, row := range mRows {
+		if row[0] != strconv.Itoa(SchemaVersion) {
+			return out, fmt.Errorf("csvflush: metrics.csv record %d has unsupported schema_version %q", i+1, row[0])
+		}
 		seq, err := strconv.ParseInt(row[2], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode metrics.csv flush_seq: %w", err)
 		}
 		tNs, err := strconv.ParseInt(row[3], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode metrics.csv t_ns: %w", err)
 		}
 		val, err := strconv.ParseInt(row[10], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode metrics.csv value: %w", err)
 		}
 		labels, err := decodeLabelsJSON(row[9])
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode metrics.csv labels_json: %w", err)
 		}
 		out.Metrics = append(out.Metrics, MetricRow{
 			RunID:     row[1],
@@ -324,30 +335,33 @@ func Read(dir string) (RunData, error) {
 	if err != nil {
 		return out, err
 	}
-	for _, row := range hRows {
+	for i, row := range hRows {
+		if row[0] != strconv.Itoa(SchemaVersion) {
+			return out, fmt.Errorf("csvflush: histograms.csv record %d has unsupported schema_version %q", i+1, row[0])
+		}
 		seq, err := strconv.ParseInt(row[2], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv flush_seq: %w", err)
 		}
 		tNs, err := strconv.ParseInt(row[3], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv t_ns: %w", err)
 		}
 		lo, err := strconv.ParseInt(row[9], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv bucket_lo: %w", err)
 		}
 		hi, err := strconv.ParseInt(row[10], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv bucket_hi: %w", err)
 		}
 		cnt, err := strconv.ParseInt(row[11], 10, 64)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv count: %w", err)
 		}
 		labels, err := decodeLabelsJSON(row[8])
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("csvflush: decode histograms.csv labels_json: %w", err)
 		}
 		out.Histograms = append(out.Histograms, HistRow{
 			RunID:     row[1],
@@ -376,7 +390,7 @@ func readCSV(path string, expectedHeader []string) ([][]string, error) {
 	cr := csv.NewReader(f)
 	hdr, err := cr.Read()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("csvflush: read %q header: %w", path, err)
 	}
 	if len(hdr) != len(expectedHeader) {
 		return nil, fmt.Errorf("csvflush: %s header mismatch: got %v", path, hdr)
@@ -393,7 +407,7 @@ func readCSV(path string, expectedHeader []string) ([][]string, error) {
 			return rows, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("csvflush: read %q record: %w", path, err)
 		}
 		rows = append(rows, rec)
 	}

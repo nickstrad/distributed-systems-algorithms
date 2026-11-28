@@ -1,6 +1,10 @@
 package sim
 
-import "github.com/nickstrad/distributed-systems-algorithms/env"
+import (
+	"fmt"
+
+	"github.com/nickstrad/distributed-systems-algorithms/env"
+)
 
 // simEvent is a scheduled callback in the simulator's indexed min-heap.
 type simEvent struct {
@@ -29,7 +33,14 @@ func (q eventQueue) swap(i, j int) {
 	q[j].hi = j
 }
 
+// push schedules a detached event. Timers use the stored index for cancellation.
+//
+//	pre: e.hi == -1
+//	post: (*q)[e.hi] == e
 func (q *eventQueue) push(e *simEvent) {
+	if e.hi != -1 {
+		panic(fmt.Sprintf("sim: enqueue event %d with existing heap index %d", e.seq, e.hi))
+	}
 	e.hi = len(*q)
 	*q = append(*q, e)
 	q.siftUp(e.hi)

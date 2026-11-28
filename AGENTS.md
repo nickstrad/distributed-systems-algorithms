@@ -44,7 +44,7 @@ Whenever you add, rename, or change packages, algorithm suites, JSON configs, `M
 Before finishing any code change, run:
 
 ```sh
-make check          # fmt-check + go vet + go test -race -cover + build + all configs/*.json suites
+make check          # fmt-check + go vet + go test -race -cover + build + all configs/*.json suites + CLI end-to-end
 make test-prop      # all rapid property tests under -race
 ```
 
@@ -53,3 +53,9 @@ When adding or changing a suite, also inspect its narrative report:
 ```sh
 make story SUITE=<name>   # or CONFIG=configs/<name>.json
 ```
+
+## 4. Implementing a protocol module
+
+- Apply the [Go conventions](docs/go-conventions.md) at input boundaries and state transitions. Document the assumptions and guarantees a caller relies on.
+- Match each protocol guarantee to an observable check using the [testing strategy](docs/testing-strategy.md). Exercise the built CLI with `make test-e2e` when changing its config-to-report path.
+- Follow the [module observability conventions](docs/module-observability.md). Keep measurements with their owning module and export through the existing collector.

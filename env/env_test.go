@@ -167,6 +167,7 @@ func TestCluster(t *testing.T) {
 		{n: 3, f: 0, want: 2},
 		{n: 4, f: 0, want: 3},
 		{n: 4, f: -1, want: 0},
+		{n: 4, f: math.MaxInt, want: math.MaxInt/2 + 3},
 	}
 	for _, tc := range bftCases {
 		peers := make([]env.NodeID, tc.n)

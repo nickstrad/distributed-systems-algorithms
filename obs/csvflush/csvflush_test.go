@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,5 +307,119 @@ func TestEndToEndSimAndJobDeterminism(t *testing.T) {
 		if !bytes.Equal(b1, b2) {
 			t.Fatalf("%s differs between identical runs:\n--- run1 ---\n%s\n--- run2 ---\n%s", name, b1, b2)
 		}
+	}
+}
+
+func TestNewLeavesDataIntactWhenMarkerRemovalFails(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "run.csv")
+	if err := os.Mkdir(markerPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A nonempty directory cannot be removed as a file.
+	if err := os.WriteFile(filepath.Join(markerPath, "blocker"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metricsPath := filepath.Join(dir, "metrics.csv")
+	prior := []byte("prior metrics")
+	if err := os.WriteFile(metricsPath, prior, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := csvflush.New(dir, csvflush.RunInfo{}); err == nil {
+		t.Fatal("New succeeded with an irremovable completion marker")
+	}
+	got, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, prior) {
+		t.Fatalf("metrics after failed New = %q, want %q", got, prior)
+	}
+}
+
+func TestCloseRemovesStagedMarkerAfterFailedPublish(t *testing.T) {
+	dir := t.TempDir()
+	w, err := csvflush.New(dir, csvflush.RunInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(dir, "run.csv")
+	if err := os.Mkdir(markerPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("Close succeeded with a blocked completion marker")
+	}
+	temps, err := filepath.Glob(filepath.Join(dir, ".run-*.csv"))
+	if err != nil || len(temps) != 0 {
+		t.Fatalf("staged completion markers = %v, err = %v", temps, err)
+	}
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := csvflush.Read(dir); !errors.Is(err, csvflush.ErrIncomplete) {
+		t.Fatalf("Read after failed Close err = %v, want ErrIncomplete", err)
+	}
+}
+
+func TestReadRejectsUnsupportedDataSchema(t *testing.T) {
+	for _, file := range []string{"metrics.csv", "histograms.csv"} {
+		t.Run(file, func(t *testing.T) {
+			dir := t.TempDir()
+			w, err := csvflush.New(dir, csvflush.RunInfo{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap := obs.Snapshot{
+				Points: []obs.Point{{Component: "worker", Metric: "jobs"}},
+				Hists: []obs.HistPoint{{
+					Component: "worker",
+					Metric:    "batch",
+					Buckets:   []obs.Bucket{{Lo: 1, Hi: 1, Count: 1}},
+				}},
+			}
+			if err := w.Export(snap); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, file)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = bytes.Replace(body, []byte("\n1,"), []byte("\n99,"), 1)
+			if err := os.WriteFile(path, body, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = csvflush.Read(dir)
+			if err == nil || !strings.Contains(err.Error(), file+" record 1 has unsupported schema_version") {
+				t.Fatalf("Read error = %v, want unsupported schema_version in %s", err, file)
+			}
+		})
+	}
+}
+
+func TestCompletedFilesShareCreationPermissions(t *testing.T) {
+	dir := t.TempDir()
+	w, err := csvflush.New(dir, csvflush.RunInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := os.Stat(filepath.Join(dir, "metrics.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := os.Stat(filepath.Join(dir, "run.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.Mode().Perm() != metrics.Mode().Perm() {
+		t.Fatalf("run.csv mode %v, want %v", marker.Mode().Perm(), metrics.Mode().Perm())
 	}
 }

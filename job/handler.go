@@ -2,10 +2,7 @@
 // buffered job handlers built on env.Dispatcher.
 package job
 
-import (
-	"github.com/nickstrad/distributed-systems-algorithms/env"
-	"github.com/nickstrad/distributed-systems-algorithms/obs"
-)
+import "github.com/nickstrad/distributed-systems-algorithms/env"
 
 // Job represents a unit of work submitted to a Handler or Transformer.
 type Job struct {
@@ -14,7 +11,9 @@ type Job struct {
 }
 
 // Handler accepts jobs for processing and emits confirmation callbacks when
-// submission has been accepted or completed.
+// submission has been accepted or completed, as documented by the implementation.
+// The built-in handlers enqueue indications on the owning dispatcher. Callers
+// register listeners and submit jobs from the same execution loop.
 type Handler interface {
 	Submit(j Job)
 	OnConfirm(fn func(Job))
@@ -27,9 +26,7 @@ type SyncHandler struct {
 	dispatch  env.Dispatcher
 	process   func(Job)
 	listeners []func(Job)
-	submitted obs.Counter
-	confirmed obs.Counter
-	processed obs.Counter
+	stats     handlerStats
 }
 
 var _ Handler = (*SyncHandler)(nil)
@@ -58,30 +55,15 @@ func (h *SyncHandler) OnConfirm(fn func(Job)) {
 // Submit processes j synchronously (if process is non-nil) and enqueues
 // registered OnConfirm callbacks on dispatch.
 func (h *SyncHandler) Submit(j Job) {
-	h.submitted.Inc()
+	h.stats.submitted.Inc()
 	if h.process != nil {
 		h.process(j)
 	}
-	h.processed.Inc()
+	h.stats.processed.Inc()
 	h.dispatch.Enqueue(func() {
-		h.confirmed.Inc()
+		h.stats.confirmed.Inc()
 		emitJob(h.listeners, j)
 	})
-}
-
-// MetricsSource returns an obs.Source exporting this handler's runtime counters.
-func (h *SyncHandler) MetricsSource(component string) obs.Source {
-	if component == "" {
-		component = "job_sync"
-	}
-	return obs.SourceFunc{
-		Name: component,
-		Fn: func(e *obs.Emitter) {
-			e.Counter("submitted", "count", "Total jobs submitted", h.submitted.Value())
-			e.Counter("processed", "count", "Total jobs processed", h.processed.Value())
-			e.Counter("confirmed", "count", "Total job confirmations emitted", h.confirmed.Value())
-		},
-	}
 }
 
 // AsyncHandler buffers submitted jobs in an unbounded FIFO queue, immediately
@@ -94,10 +76,7 @@ type AsyncHandler struct {
 	buf       *env.SliceFIFO[Job]
 	scheduled bool
 	epoch     uint64
-	submitted obs.Counter
-	confirmed obs.Counter
-	processed obs.Counter
-	buffered  obs.Gauge
+	stats     asyncStats
 }
 
 var _ Handler = (*AsyncHandler)(nil)
@@ -116,14 +95,15 @@ func NewAsyncHandler(dispatch env.Dispatcher, process func(Job)) *AsyncHandler {
 }
 
 // Init resets the handler's pending job buffer and drain state while preserving
-// registered OnConfirm listeners. AsyncHandler is safe to use without calling Init.
+// registered OnConfirm listeners, queued confirmations, and cumulative metrics.
+// AsyncHandler is safe to use without calling Init.
 func (h *AsyncHandler) Init() {
 	if h.buf == nil {
 		h.buf = env.NewSliceFIFO[Job]()
 	} else {
 		h.buf.Clear()
 	}
-	h.buffered.Set(0)
+	h.stats.buffered.Set(0)
 	h.scheduled = false
 	h.epoch++
 }
@@ -143,11 +123,11 @@ func (h *AsyncHandler) Submit(j Job) {
 	if h.buf == nil {
 		h.buf = env.NewSliceFIFO[Job]()
 	}
-	h.submitted.Inc()
+	h.stats.submitted.Inc()
 	h.buf.Push(j)
-	h.buffered.Set(int64(h.buf.Len()))
+	h.stats.buffered.Set(int64(h.buf.Len()))
 	h.dispatch.Enqueue(func() {
-		h.confirmed.Inc()
+		h.stats.confirmed.Inc()
 		emitJob(h.listeners, j)
 	})
 	if !h.scheduled {
@@ -163,6 +143,10 @@ func (h *AsyncHandler) scheduleDrain() {
 	})
 }
 
+// drain processes at most one FIFO entry for the scheduled epoch. The process
+// callback may reset the handler, so the epoch is checked again afterward.
+//
+//	post: for the current epoch, pending work has a scheduled drain
 func (h *AsyncHandler) drain(epoch uint64) {
 	if epoch != h.epoch {
 		return
@@ -172,11 +156,11 @@ func (h *AsyncHandler) drain(epoch uint64) {
 		h.scheduled = false
 		return
 	}
-	h.buffered.Set(int64(h.buf.Len()))
+	h.stats.buffered.Set(int64(h.buf.Len()))
 	if h.process != nil {
 		h.process(j)
 	}
-	h.processed.Inc()
+	h.stats.processed.Inc()
 	if epoch != h.epoch {
 		return
 	}
@@ -184,23 +168,6 @@ func (h *AsyncHandler) drain(epoch uint64) {
 		h.scheduleDrain()
 	} else {
 		h.scheduled = false
-	}
-}
-
-// MetricsSource returns an obs.Source exporting this handler's runtime metrics.
-func (h *AsyncHandler) MetricsSource(component string) obs.Source {
-	if component == "" {
-		component = "job_async"
-	}
-	return obs.SourceFunc{
-		Name: component,
-		Fn: func(e *obs.Emitter) {
-			e.Counter("submitted", "count", "Total jobs submitted", h.submitted.Value())
-			e.Counter("processed", "count", "Total jobs processed", h.processed.Value())
-			e.Counter("confirmed", "count", "Total job confirmations emitted", h.confirmed.Value())
-			e.Gauge("buffered", "count", "Current buffered jobs awaiting drain", h.buffered.Value())
-			e.Gauge("buffered_peak", "count", "Peak buffered jobs awaiting drain", h.buffered.Peak())
-		},
 	}
 }
 

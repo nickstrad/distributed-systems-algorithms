@@ -101,13 +101,13 @@ func (c Cluster) Majority() int {
 	return len(c.Peers)/2 + 1
 }
 
-// ByzantineQuorum returns ceil((N+f+1)/2) = (N+f)/2 + 1 for a Byzantine fault
+// ByzantineQuorum returns floor((N+f)/2)+1 for a Byzantine fault
 // tolerance bound f, or 0 if N == 0 or f < 0.
 func (c Cluster) ByzantineQuorum(f int) int {
 	if len(c.Peers) == 0 || f < 0 {
 		return 0
 	}
-	return (len(c.Peers)+f)/2 + 1
+	return int((uint(len(c.Peers))+uint(f))/2) + 1
 }
 
 // PeersCopy returns an independent copy of Peers.

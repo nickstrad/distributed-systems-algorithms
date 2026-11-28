@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -136,5 +137,30 @@ func TestAdapterExportAndLastDefensiveCopy(t *testing.T) {
 	badAdapter := logline.New(errWriter{})
 	if err := badAdapter.Export(snap); err == nil {
 		t.Fatal("errWriter Export returned nil, want error")
+	}
+}
+
+func TestRenderBoundsUnstructuredMetadata(t *testing.T) {
+	for _, instance := range []string{strings.Repeat("x", 2048), strings.Repeat("\n", 600)} {
+		snap := obs.Snapshot{Instance: instance, Points: []obs.Point{
+			{Component: "sim", Metric: "line\nbreak"},
+			{Component: "sim", Metric: "steps", Value: 3},
+		}}
+		line := string(logline.Render(snap))
+		if len(line) > logline.MaxLineBytes || strings.Count(line, "\n") != 1 ||
+			!strings.Contains(line, "sim.steps=3") || !strings.HasSuffix(line, logline.TruncatedMark+"\n") {
+			t.Fatalf("invalid summary: %q", line)
+		}
+	}
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestExportReportsShortWrite(t *testing.T) {
+	a := logline.New(shortWriter{})
+	if err := a.Export(obs.Snapshot{Seq: 7}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Export returned %v, want io.ErrShortWrite", err)
 	}
 }

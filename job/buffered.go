@@ -1,8 +1,9 @@
 package job
 
 import (
+	"fmt"
+
 	"github.com/nickstrad/distributed-systems-algorithms/env"
-	"github.com/nickstrad/distributed-systems-algorithms/obs"
 )
 
 // Transformer extends Handler with an error callback for rejected jobs
@@ -15,6 +16,8 @@ type Transformer interface {
 
 // BufferedTransformer wraps an underlying Handler with a bounded circular
 // buffer of fixed capacity and forwards at most one in-flight job at a time.
+// The underlying handler must emit exactly one confirmation for each forwarded
+// job and must be dedicated to this transformer.
 type BufferedTransformer struct {
 	dispatch         env.Dispatcher
 	handler          Handler
@@ -25,11 +28,7 @@ type BufferedTransformer struct {
 	handling         bool
 	confirmListeners []func(Job)
 	errorListeners   []func(Job)
-	submitted        obs.Counter
-	confirmed        obs.Counter
-	errored          obs.Counter
-	forwarded        obs.Counter
-	buffered         obs.Gauge
+	stats            bufferedStats
 }
 
 var (
@@ -48,7 +47,7 @@ func NewBufferedTransformer(dispatch env.Dispatcher, handler Handler, capacity i
 		panic("job: nil handler")
 	}
 	if capacity <= 0 {
-		panic("job: capacity must be positive")
+		panic(fmt.Sprintf("job: capacity must be positive, got %d", capacity))
 	}
 	t := &BufferedTransformer{
 		dispatch: dispatch,
@@ -58,6 +57,7 @@ func NewBufferedTransformer(dispatch env.Dispatcher, handler Handler, capacity i
 	}
 	handler.OnConfirm(func(Job) {
 		t.handling = false
+		t.stats.inFlight.Set(0)
 		t.step()
 	})
 	return t
@@ -85,19 +85,20 @@ func (t *BufferedTransformer) OnError(fn func(Job)) {
 // dispatch if space is available, or rejects j and emits OnError via dispatch
 // when full.
 func (t *BufferedTransformer) Submit(j Job) {
-	t.submitted.Inc()
-	if t.bottom+t.capacity == t.top {
+	depth := t.checkedDepth()
+	t.stats.submitted.Inc()
+	if depth == t.capacity {
 		t.dispatch.Enqueue(func() {
-			t.errored.Inc()
+			t.stats.errored.Inc()
 			emitJob(t.errorListeners, j)
 		})
 		return
 	}
 	t.buf[t.top%t.capacity] = j
 	t.top++
-	t.buffered.Set(int64(t.top - t.bottom))
+	t.recordDepth()
 	t.dispatch.Enqueue(func() {
-		t.confirmed.Inc()
+		t.stats.confirmed.Inc()
 		emitJob(t.confirmListeners, j)
 	})
 	t.step()
@@ -109,32 +110,28 @@ func (t *BufferedTransformer) step() {
 		j := t.buf[idx]
 		t.buf[idx] = Job{}
 		t.bottom++
-		t.buffered.Set(int64(t.top - t.bottom))
+		t.recordDepth()
 		t.handling = true
-		t.forwarded.Inc()
+		t.stats.inFlight.Set(1)
+		t.stats.forwarded.Inc()
 		t.handler.Submit(j)
 	}
 }
 
-// MetricsSource returns an obs.Source exporting this transformer's runtime metrics.
-func (t *BufferedTransformer) MetricsSource(component string) obs.Source {
-	if component == "" {
-		component = "job_buffered"
+// recordDepth follows each ring mutation, before control passes to another module.
+//
+//	post: the published depth equals the number of occupied slots
+func (t *BufferedTransformer) recordDepth() {
+	t.stats.buffered.Set(int64(t.checkedDepth()))
+}
+
+// checkedDepth checks the ring occupancy at a stable boundary.
+//
+//	Invariant: 0 <= top - bottom <= capacity
+func (t *BufferedTransformer) checkedDepth() int {
+	depth := t.top - t.bottom
+	if depth < 0 || depth > t.capacity {
+		panic(fmt.Sprintf("job: ring depth %d outside [0, %d] (top=%d bottom=%d)", depth, t.capacity, t.top, t.bottom))
 	}
-	return obs.SourceFunc{
-		Name: component,
-		Fn: func(e *obs.Emitter) {
-			var inFlight int64
-			if t.handling {
-				inFlight = 1
-			}
-			e.Counter("submitted", "count", "Total jobs submitted", t.submitted.Value())
-			e.Counter("confirmed", "count", "Total accepted jobs confirmed", t.confirmed.Value())
-			e.Counter("errored", "count", "Total jobs rejected due to full buffer", t.errored.Value())
-			e.Counter("forwarded", "count", "Total jobs forwarded to underlying handler", t.forwarded.Value())
-			e.Gauge("buffered", "count", "Current buffered jobs", t.buffered.Value())
-			e.Gauge("buffered_peak", "count", "Peak buffered jobs", t.buffered.Peak())
-			e.Gauge("in_flight", "count", "Current in-flight jobs in underlying handler", inFlight)
-		},
-	}
+	return depth
 }

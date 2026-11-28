@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/nickstrad/distributed-systems-algorithms/env"
-	"github.com/nickstrad/distributed-systems-algorithms/obs"
 )
 
 const (
@@ -130,9 +129,7 @@ type Sim struct {
 	traceHead   int
 	traceCount  int
 	totalTraces int64
-	crashes     obs.Counter
-	recoveries  obs.Counter
-	liveNodes   obs.Gauge
+	stats       simStats
 }
 
 // New constructs a new deterministic simulator from cfg.
@@ -244,11 +241,11 @@ func (s *Sim) AddNode(id env.NodeID, peers []env.NodeID, factory func(env.Env) e
 
 // AddNodeWithKeys registers a new node with an explicit KeyRing.
 func (s *Sim) AddNodeWithKeys(id env.NodeID, peers []env.NodeID, keys *env.KeyRing, factory func(env.Env) env.Process) error {
-	if id == "" || factory == nil {
-		return fmt.Errorf("%w: empty node id or nil factory", env.ErrInvalidArgument)
+	if factory == nil {
+		return fmt.Errorf("add node %q: nil factory: %w", id, env.ErrInvalidArgument)
 	}
-	if _, exists := s.nodes[id]; exists {
-		return fmt.Errorf("%w: duplicate node %s", env.ErrInvalidArgument, id)
+	if err := s.validateNewNodeID(id); err != nil {
+		return fmt.Errorf("add node: %w", err)
 	}
 	node := &simNode{
 		id:          id,
@@ -263,7 +260,7 @@ func (s *Sim) AddNodeWithKeys(id env.NodeID, peers []env.NodeID, keys *env.KeyRi
 		keys:        keys,
 	}
 	s.nodes[id] = node
-	s.liveNodes.Inc()
+	s.stats.liveNodes.Inc()
 	node.drainFn = s.makeDrainFn(node, node.incarnation)
 	node.proc = factory(s.makeEnv(node))
 	s.record("node.add", string(id))
@@ -271,18 +268,43 @@ func (s *Sim) AddNodeWithKeys(id env.NodeID, peers []env.NodeID, keys *env.KeyRi
 	return nil
 }
 
-// AddCluster registers all peers with shared deterministic cryptographic keys.
+func (s *Sim) validateNewNodeID(id env.NodeID) error {
+	if id == "" {
+		return fmt.Errorf("empty node ID: %w", env.ErrInvalidArgument)
+	}
+	if _, exists := s.nodes[id]; exists {
+		return fmt.Errorf("duplicate node %q: %w", id, env.ErrInvalidArgument)
+	}
+	return nil
+}
+
+// AddCluster registers all distinct peers with shared deterministic
+// cryptographic keys. An empty peer list is a no-op. Factories must not
+// change node registrations while the cluster is being added.
+//
+//	post: validation errors leave node registrations and scheduled callbacks unchanged
 func (s *Sim) AddCluster(peers []env.NodeID, factory func(env.Env) env.Process) error {
+	if len(peers) == 0 {
+		return nil
+	}
+	if factory == nil {
+		return fmt.Errorf("add cluster: nil factory: %w", env.ErrInvalidArgument)
+	}
 	sorted := slices.Clone(peers)
 	slices.Sort(sorted)
 	sorted = slices.Compact(sorted)
+	for _, id := range sorted {
+		if err := s.validateNewNodeID(id); err != nil {
+			return fmt.Errorf("add cluster: %w", err)
+		}
+	}
 	rings, err := env.GenerateKeyRings(sorted, s.Stream("keys"))
 	if err != nil {
-		return err
+		return fmt.Errorf("add cluster: generate key rings: %w", err)
 	}
 	for _, id := range sorted {
 		if err := s.AddNodeWithKeys(id, sorted, rings[id], factory); err != nil {
-			return err
+			return fmt.Errorf("add cluster: %w", err)
 		}
 	}
 	return nil
@@ -308,7 +330,7 @@ func (s *Sim) IsAlive(id env.NodeID) bool {
 func (s *Sim) Crash(id env.NodeID) error {
 	n, ok := s.nodes[id]
 	if !ok {
-		return fmt.Errorf("%w: %s", env.ErrUnknownPeer, id)
+		return fmt.Errorf("crash node %q: %w", id, env.ErrUnknownPeer)
 	}
 	if !n.alive {
 		return nil
@@ -326,8 +348,8 @@ func (s *Sim) Crash(id env.NodeID) error {
 	}
 	clear(n.timers)
 	n.proc = nil
-	s.crashes.Inc()
-	s.liveNodes.Dec()
+	s.stats.crashes.Inc()
+	s.stats.liveNodes.Dec()
 	s.record("node.crash", string(id))
 	return nil
 }
@@ -337,7 +359,7 @@ func (s *Sim) Crash(id env.NodeID) error {
 func (s *Sim) Recover(id env.NodeID) error {
 	n, ok := s.nodes[id]
 	if !ok {
-		return fmt.Errorf("%w: %s", env.ErrUnknownPeer, id)
+		return fmt.Errorf("recover node %q: %w", id, env.ErrUnknownPeer)
 	}
 	if n.alive {
 		return nil
@@ -346,31 +368,11 @@ func (s *Sim) Recover(id env.NodeID) error {
 	n.incarnation++
 	n.drainFn = s.makeDrainFn(n, n.incarnation)
 	n.proc = n.factory(s.makeEnv(n))
-	s.recoveries.Inc()
-	s.liveNodes.Inc()
+	s.stats.recoveries.Inc()
+	s.stats.liveNodes.Inc()
 	s.record("node.recover", string(id))
 	s.enqueueLocal(n, n.incarnation, n.proc.Recover)
 	return nil
-}
-
-// MetricsSource returns an obs.Source exporting deterministic simulator and
-// network counters, gauges, and delivery-latency histograms.
-func (s *Sim) MetricsSource() obs.Source {
-	return obs.SourceFunc{
-		Name: "sim",
-		Fn: func(e *obs.Emitter) {
-			e.Counter("steps", "count", "Total simulator events executed", s.steps)
-			e.Counter("messages_sent", "count", "Total messages submitted to simulated network", s.net.sent.Value())
-			e.Counter("messages_dropped", "count", "Total messages dropped by loss or partition", s.net.dropped.Value())
-			e.Counter("messages_duplicated", "count", "Total extra duplicate message copies scheduled", s.net.duplicated.Value())
-			e.Counter("messages_delivered", "count", "Total messages delivered to live nodes", s.net.delivered.Value())
-			e.Counter("node_crashes", "count", "Total simulated node crashes", s.crashes.Value())
-			e.Counter("node_recoveries", "count", "Total simulated node recoveries", s.recoveries.Value())
-			e.Gauge("nodes_live", "count", "Current number of live simulated nodes", s.liveNodes.Value())
-			e.Gauge("nodes_live_peak", "count", "Peak number of live simulated nodes", s.liveNodes.Peak())
-			e.Histogram("net_delivery_latency", "ns", "Simulated message delivery latency", s.net.latency)
-		},
-	}
 }
 
 // SetNetConfig updates simulated network latency and fault rates.

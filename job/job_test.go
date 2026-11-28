@@ -7,12 +7,14 @@ package job_test
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/nickstrad/distributed-systems-algorithms/env"
 	"github.com/nickstrad/distributed-systems-algorithms/job"
+	"github.com/nickstrad/distributed-systems-algorithms/obs"
 	"github.com/nickstrad/distributed-systems-algorithms/sim"
 )
 
@@ -171,9 +173,15 @@ func TestAsyncHandlerInitReset(t *testing.T) {
 		confirmed = append(confirmed, j.ID)
 	})
 
+	c := obs.NewCollector("node")
+	c.Register(h.MetricsSource(""))
+
 	h.Submit(job.Job{ID: "stale-1"})
 	h.Submit(job.Job{ID: "stale-2"})
 	h.Init()
+	checkMetrics(t, c, "job_async", map[string]int64{
+		"submitted": 2, "processed": 0, "confirmed": 0, "buffered": 0, "buffered_peak": 2,
+	})
 
 	h.Submit(job.Job{ID: "fresh-1"})
 	h.Submit(job.Job{ID: "fresh-2"})
@@ -186,6 +194,9 @@ func TestAsyncHandlerInitReset(t *testing.T) {
 	if !slices.Equal(confirmed, []string{"stale-1", "stale-2", "fresh-1", "fresh-2"}) {
 		t.Fatalf("confirmed = %v", confirmed)
 	}
+	checkMetrics(t, c, "job_async", map[string]int64{
+		"submitted": 4, "processed": 2, "confirmed": 4, "buffered": 0, "buffered_peak": 2,
+	})
 }
 
 func TestBufferedTransformerInvalidCapacityPanics(t *testing.T) {
@@ -481,5 +492,43 @@ func TestBufferedTransformerDeterministicReplay(t *testing.T) {
 				t.Fatalf("seed=%d async=%v processedOrder mismatch", seed, useAsync)
 			}
 		}
+	}
+}
+
+func TestBufferedMetricsFollowDispatch(t *testing.T) {
+	d := newFIFODispatcher()
+	inner := job.NewSyncHandler(d, nil)
+	bt := job.NewBufferedTransformer(d, inner, 1)
+	c := obs.NewCollector("node")
+	c.Register(bt.MetricsSource(""))
+	c.Register(inner.MetricsSource(""))
+
+	bt.Submit(job.Job{ID: "first"})
+	bt.Submit(job.Job{ID: "buffered"})
+	bt.Submit(job.Job{ID: "rejected"})
+	checkMetrics(t, c, "job_buffered", map[string]int64{
+		"submitted": 3, "confirmed": 0, "errored": 0, "forwarded": 1,
+		"buffered": 1, "buffered_peak": 1, "in_flight": 1,
+	})
+	checkMetrics(t, c, "job_sync", map[string]int64{"submitted": 1, "processed": 1, "confirmed": 0})
+
+	d.drain()
+	checkMetrics(t, c, "job_buffered", map[string]int64{
+		"submitted": 3, "confirmed": 2, "errored": 1, "forwarded": 2,
+		"buffered": 0, "buffered_peak": 1, "in_flight": 0,
+	})
+	checkMetrics(t, c, "job_sync", map[string]int64{"submitted": 2, "processed": 2, "confirmed": 2})
+}
+
+func checkMetrics(t *testing.T, c *obs.Collector, component string, want map[string]int64) {
+	t.Helper()
+	got := make(map[string]int64)
+	for _, p := range c.Collect(0).Points {
+		if p.Component == component {
+			got[p.Metric] = p.Value
+		}
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("%s metrics = %v, want %v", component, got, want)
 	}
 }

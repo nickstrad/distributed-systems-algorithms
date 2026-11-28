@@ -112,3 +112,7 @@ Keep the simulator lean early on; add these only when later packages warrant the
 - **Fault schedule fuzzing & 1-minimal shrinking**: `go test -fuzz` decoding bytes into `[]Fault` schedules with delete-one shrinking (useful once Paxos/Byzantine/SMR land).
 - **Determinism static lint (`detlint`)**: lightweight AST check banning `time.Now`, `go`, `sync`, `math/rand`, and unsorted map iteration in algorithm packages once the codebase grows past several packages.
 - **Chaos nemesis with fault budgets**: automated alternating chaos + heal windows ensuring quorum survival (`f < N/2` or `f < N/3`) during long multi-seed sweeps.
+
+## 5. First link implementation and telemetry
+
+The [first link checklist](next-link.md) connects the roadmap to a bounded simulation and acceptance criteria. Module-owned stats follow the working example in [job/buffered_stats.go](../job/buffered_stats.go). CSV and Prometheus share an `obs.Snapshot`. A future OTLP adapter belongs in `runtime/`, where network I/O, SDK dependencies, export timeouts and shutdown can be tested independently of simulated time. See the [observability walkthrough](module-observability.md).

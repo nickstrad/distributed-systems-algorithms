@@ -118,7 +118,8 @@ func formatReport(testName string, s *sim.Sim, err error) string {
 		fmt.Fprintf(&b, "panic stack:\n%s\n", strings.TrimRight(string(pe.Stack), "\n"))
 	}
 
-	fmt.Fprintf(&b, "REPLAY: go test ./... -run '%s' -seed=%d -count=1", replayRunPattern(testName), seed)
+	pattern := strings.ReplaceAll(replayRunPattern(testName), "'", "'\"'\"'")
+	fmt.Fprintf(&b, "REPLAY: DST_SEED=%d go test ./... -run '%s' -count=1", seed, pattern)
 	return b.String()
 }
 

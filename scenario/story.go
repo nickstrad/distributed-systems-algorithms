@@ -146,7 +146,7 @@ func FormatStory(res RunResult, replayCmd string) string {
 func FormatCSVReport(dir string) (string, error) {
 	data, err := csvflush.Read(dir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("scenario: read CSV report from %s: %w", dir, err)
 	}
 
 	var b strings.Builder

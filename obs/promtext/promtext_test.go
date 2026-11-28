@@ -8,6 +8,7 @@ package promtext_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,5 +222,21 @@ func TestRenderOmitsEmptyBracesWhenAllLabelsFiltered(t *testing.T) {
 	}
 	if !strings.Contains(out, "dsa_c_m 7\n") {
 		t.Fatalf("expected bare metric line 'dsa_c_m 7', got:\n%s", out)
+	}
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestExportRetainsScrapeBodyAfterShortWrite(t *testing.T) {
+	a := promtext.New("", shortWriter{})
+	snap := obs.Snapshot{Points: []obs.Point{{Component: "job", Metric: "submitted", Value: 4}}}
+
+	if err := a.Export(snap); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Export error = %v, want io.ErrShortWrite", err)
+	}
+	if want := promtext.Render("dsa_", snap); !bytes.Equal(a.Last(), want) {
+		t.Fatalf("cached exposition = %q, want %q", a.Last(), want)
 	}
 }

@@ -60,6 +60,7 @@ func (e *Emitter) Histogram(metric, unit, help string, h *Histogram, labels ...L
 }
 
 // Source is implemented by any component that exports runtime metrics.
+// Emit runs on the execution loop that owns the component's live state.
 type Source interface {
 	Component() string
 	Emit(e *Emitter)
@@ -91,7 +92,8 @@ type adapterSlot struct {
 
 // Collector gathers registered Sources in deterministic sorted component order
 // and fans immutable Snapshots out to attached Adapters. Adapter failures are
-// isolated and counted without interrupting execution.
+// isolated and counted without interrupting execution. The collector and its
+// sources are used from the same owning execution loop.
 type Collector struct {
 	instance string
 	sources  []Source
@@ -150,7 +152,9 @@ func (c *Collector) Collect(timeNs int64) Snapshot {
 
 // Publish collects a Snapshot at timeNs, caches it for Last(), and exports a
 // defensive copy to every attached Adapter. Adapter errors are counted and never
-// prevent subsequent adapters from running.
+// prevent subsequent adapters from running. Callers that require a particular
+// export to succeed can call that adapter directly with the returned snapshot
+// and handle its error.
 func (c *Collector) Publish(timeNs int64) Snapshot {
 	snap := c.Collect(timeNs)
 	c.seq++

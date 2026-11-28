@@ -3,6 +3,8 @@ package scenario
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/nickstrad/distributed-systems-algorithms/env"
@@ -136,7 +138,7 @@ func runJobBuffered(cfg RunConfig, seed int64, rawParams json.RawMessage) (Suite
 	}
 
 	s.AddInvariant("soundness", func() error {
-		for id := range errored {
+		for _, id := range slices.Sorted(maps.Keys(errored)) {
 			if processed[id] > 0 {
 				return fmt.Errorf("errored job %s was processed", id)
 			}

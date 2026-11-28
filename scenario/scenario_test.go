@@ -12,6 +12,7 @@ package scenario
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,14 @@ func TestLoadConfigAndValidation(t *testing.T) {
 		name string
 		json string
 	}{
+		{
+			name: "null_top_level",
+			json: `null`,
+		},
+		{
+			name: "trailing_config",
+			json: `{"suite": "job-buffered"} {}`,
+		},
 		{
 			name: "unknown_top_level_field",
 			json: `{"suite": "job-buffered", "unexpected_field": true}`,
@@ -293,6 +302,30 @@ func TestExecuteDetectsNondeterminism(t *testing.T) {
 	}
 	if res.Story.Passed() {
 		t.Fatal("expected res.Story.Passed() == false on nondeterminism")
+	}
+}
+
+func TestExecutePreservesRunOnCSVExportFailure(t *testing.T) {
+	cfg := DefaultRunConfig("job-buffered")
+	cfg.CSVDir = t.TempDir()
+	csvDir := filepath.Join(cfg.CSVDir, "job-buffered-seed-1")
+	// A non-empty directory blocks removal of the previous completion marker.
+	marker := filepath.Join(csvDir, "run.csv")
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(marker, "keep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := DefaultRegistry().Execute(cfg, cfg.Seed)
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != marker {
+		t.Fatalf("Execute error = %v, want a path error for %s", err, marker)
+	}
+	if res.Steps == 0 || res.Digest == "" || len(res.Trace) == 0 || res.CSVDir != "" {
+		t.Fatalf("Execute result has incomplete diagnostics or advertises failed export: steps=%d digest=%q trace entries=%d csv=%q",
+			res.Steps, res.Digest, len(res.Trace), res.CSVDir)
 	}
 }
 

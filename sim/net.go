@@ -2,6 +2,7 @@ package sim
 
 import (
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -29,15 +30,11 @@ type linkKey struct {
 }
 
 type simNet struct {
-	s          *Sim
-	cfg        NetConfig
-	rng        *rand.Rand
-	blocked    map[linkKey]bool
-	sent       obs.Counter
-	dropped    obs.Counter
-	duplicated obs.Counter
-	delivered  obs.Counter
-	latency    *obs.Histogram
+	s       *Sim
+	cfg     NetConfig
+	rng     *rand.Rand
+	blocked map[linkKey]bool
+	stats   networkStats
 }
 
 func newSimNet(s *Sim, cfg NetConfig) *simNet {
@@ -46,7 +43,7 @@ func newSimNet(s *Sim, cfg NetConfig) *simNet {
 		cfg:     normalizeNetConfig(cfg),
 		rng:     s.Stream("net"),
 		blocked: make(map[linkKey]bool),
-		latency: obs.NewDurationHistogram(),
+		stats:   networkStats{latency: obs.NewDurationHistogram()},
 	}
 }
 
@@ -80,6 +77,10 @@ func (n *simNet) drawLatency() time.Duration {
 	if span <= 0 {
 		return n.cfg.MinLatency
 	}
+	if span == math.MaxInt64 {
+		// The inclusive range has 2^63 values, which exceeds Int64N's bound.
+		return time.Duration(n.rng.Int64())
+	}
 	return n.cfg.MinLatency + time.Duration(n.rng.Int64N(int64(span)+1))
 }
 
@@ -89,17 +90,17 @@ func (n *simNet) send(fromNode *simNode, inc uint64, to env.NodeID, data []byte)
 	}
 	dst, ok := n.s.nodes[to]
 	if !ok {
-		return fmt.Errorf("%w: %s", env.ErrUnknownPeer, to)
+		return fmt.Errorf("send from %q to %q: %w", fromNode.id, to, env.ErrUnknownPeer)
 	}
 	from := fromNode.id
-	n.sent.Inc()
+	n.stats.sent.Inc()
 	if n.blocked[linkKey{from: from, to: to}] {
-		n.dropped.Inc()
+		n.stats.dropped.Inc()
 		n.s.record("net.drop", string(from)+"->"+string(to)+" partition")
 		return nil
 	}
 	if n.cfg.DropPPM > 0 && n.rng.IntN(PPM) < n.cfg.DropPPM {
-		n.dropped.Inc()
+		n.stats.dropped.Inc()
 		n.s.record("net.drop", string(from)+"->"+string(to)+" loss")
 		return nil
 	}
@@ -108,7 +109,7 @@ func (n *simNet) send(fromNode *simNode, inc uint64, to env.NodeID, data []byte)
 	if n.cfg.DupPPM > 0 && n.rng.IntN(PPM) < n.cfg.DupPPM {
 		extra := 1 + n.rng.IntN(n.cfg.MaxDuplicates)
 		copies += extra
-		n.duplicated.Add(int64(extra))
+		n.stats.duplicated.Add(int64(extra))
 	}
 	for i := 0; i < copies; i++ {
 		payload := slices.Clone(data)
@@ -119,8 +120,8 @@ func (n *simNet) send(fromNode *simNode, inc uint64, to env.NodeID, data []byte)
 			if !dst.alive {
 				return
 			}
-			n.delivered.Inc()
-			n.latency.Record(int64(delay))
+			n.stats.delivered.Inc()
+			n.stats.latency.Record(int64(delay))
 			dst.proc.OnMessage(from, payload)
 		})
 	}

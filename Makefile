@@ -6,7 +6,7 @@ PKG ?= ./sim
 FUZZ ?= FuzzSimSchedule
 FUZZTIME ?= 10s
 
-.PHONY: help build test test-race test-unit test-prop test-suite test-all-suites story report sweep fuzz vet fmt fmt-check check clean
+.PHONY: help build test test-race test-unit test-prop test-e2e test-suite test-all-suites story report sweep fuzz vet fmt fmt-check check clean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -26,6 +26,9 @@ test-unit: ## Run fast unit tests (-short)
 
 test-prop: ## Run all rapid property-based tests
 	go test -race -count=1 -run '^TestProp' ./...
+
+test-e2e: build ## Exercise the built CLI from JSON config through CSV report
+	sh scripts/test-cli-e2e.sh
 
 test-suite: build ## Run one algorithm suite (SUITE=name or CONFIG=path/to/config.json)
 	@if [ -n "$(CONFIG)" ]; then \
@@ -69,7 +72,7 @@ fmt-check: ## Fail if any Go file is not gofmt-formatted
 		echo "Unformatted files:"; echo "$$unformatted"; exit 1; \
 	fi
 
-check: fmt-check vet test-race test-all-suites ## Full local check: fmt, vet, race tests, and all config suites
+check: fmt-check vet test-race test-all-suites test-e2e ## Full local check: fmt, vet, race tests, all config suites, and CLI end-to-end
 
 clean: ## Remove build artifacts
 	rm -rf bin test-artifacts

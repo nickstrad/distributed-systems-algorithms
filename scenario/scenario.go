@@ -89,6 +89,9 @@ func LoadConfig(path string) (RunConfig, error) {
 	if err != nil {
 		return RunConfig{}, err
 	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return RunConfig{}, fmt.Errorf("scenario: parse config %s: expected JSON object", path)
+	}
 	cfg := DefaultRunConfig("")
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -99,7 +102,7 @@ func LoadConfig(path string) (RunConfig, error) {
 		return RunConfig{}, fmt.Errorf("scenario: parse config %s: trailing data after JSON object", path)
 	}
 	if err := cfg.Validate(); err != nil {
-		return RunConfig{}, err
+		return RunConfig{}, fmt.Errorf("scenario: validate config %s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -272,6 +275,8 @@ func (r *Registry) DefaultConfigJSON(name string) ([]byte, error) {
 
 // Execute runs cfg for a single seed, optionally double-running to verify
 // bit-for-bit determinism and exporting CSV/Prometheus outputs.
+// It preserves the simulation diagnostics available on a run failure and
+// includes each output path only after the corresponding export succeeds.
 func (r *Registry) Execute(cfg RunConfig, seed int64) (RunResult, error) {
 	if err := cfg.Validate(); err != nil {
 		return RunResult{}, err
@@ -284,27 +289,11 @@ func (r *Registry) Execute(cfg RunConfig, seed int64) (RunResult, error) {
 	out, err := suite.Run(cfg, seed, cfg.Params)
 	s, col, summary, story := out.Sim, out.Collector, out.Summary, out.Story
 	if err != nil {
-		return buildResult(suite.Name, seed, s, summary, story, "", obs.Snapshot{}, "", ""), err
+		return buildResult(suite.Name, seed, s, summary, story, "", obs.Snapshot{}, "", ""), fmt.Errorf("scenario: run suite %q: %w", suite.Name, err)
 	}
 	if col == nil {
 		col = obs.NewCollector(suite.Name)
 		col.Register(s.MetricsSource())
-	}
-
-	var csvOutDir string
-	var csvWriter *csvflush.Writer
-	if cfg.CSVDir != "" {
-		csvOutDir = filepath.Join(cfg.CSVDir, fmt.Sprintf("%s-seed-%d", suite.Name, seed))
-		csvWriter, err = csvflush.New(csvOutDir, csvflush.RunInfo{
-			RunID:    fmt.Sprintf("%s/%d", suite.Name, seed),
-			Scenario: suite.Name,
-			Seed:     seed,
-			Instance: suite.Name,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		col.AddAdapter(csvWriter)
 	}
 
 	promAdapter := promtext.New("dsa_", nil)
@@ -313,55 +302,63 @@ func (r *Registry) Execute(cfg RunConfig, seed int64) (RunResult, error) {
 	col.AddAdapter(llAdapter)
 
 	snap := col.Publish(int64(s.Now()))
+	res := buildResult(suite.Name, seed, s, summary, story, strings.TrimSpace(string(llAdapter.Last())), snap, "", "")
 
-	if csvWriter != nil {
-		if cerr := csvWriter.Close(); cerr != nil {
-			return RunResult{}, cerr
+	if cfg.CSVDir != "" {
+		csvOutDir := filepath.Join(cfg.CSVDir, fmt.Sprintf("%s-seed-%d", suite.Name, seed))
+		csvWriter, err := csvflush.New(csvOutDir, csvflush.RunInfo{
+			RunID:    fmt.Sprintf("%s/%d", suite.Name, seed),
+			Scenario: suite.Name,
+			Seed:     seed,
+			Instance: suite.Name,
+		})
+		if err != nil {
+			return res, fmt.Errorf("scenario: open CSV export %s: %w", csvOutDir, err)
 		}
+		// The collector counts adapter errors instead of returning them. Export
+		// explicitly because the caller requested a persisted run.
+		exportErr := csvWriter.Export(snap)
+		if err := errors.Join(exportErr, csvWriter.Close()); err != nil {
+			return res, fmt.Errorf("scenario: export CSV to %s: %w", csvOutDir, err)
+		}
+		res.CSVDir = csvOutDir
 	}
 
-	var promOutPath string
 	if cfg.PromFile != "" {
-		promOutPath = cfg.PromFile
+		promOutPath := cfg.PromFile
 		if cfg.Seeds > 1 {
 			ext := filepath.Ext(promOutPath)
 			base := strings.TrimSuffix(promOutPath, ext)
 			promOutPath = fmt.Sprintf("%s-seed-%d%s", base, seed, ext)
 		}
 		if err := os.MkdirAll(filepath.Dir(promOutPath), 0o755); err != nil {
-			return RunResult{}, err
+			return res, fmt.Errorf("scenario: create Prometheus export directory: %w", err)
 		}
 		if err := os.WriteFile(promOutPath, promAdapter.Last(), 0o644); err != nil {
-			return RunResult{}, err
+			return res, fmt.Errorf("scenario: write Prometheus export: %w", err)
 		}
+		res.PromFile = promOutPath
 	}
 
 	if cfg.CheckDeterminism {
 		out2, err2 := suite.Run(cfg, seed, cfg.Params)
 		if err2 != nil {
-			res := buildResult(suite.Name, seed, s, summary, story, strings.TrimSpace(string(llAdapter.Last())), snap, csvOutDir, promOutPath)
 			return res, fmt.Errorf("scenario: determinism replay failed: %w", err2)
 		}
 		s2 := out2.Sim
 		detOK := s.Digest() == s2.Digest() && s.Steps() == s2.Steps() && s.Now() == s2.Now()
-		story.Checks = append(story.Checks, Check{
+		res.Story.Checks = append(slices.Clone(story.Checks), Check{
 			Claim:    "Deterministic replay (double-run digest/steps/time match)",
-			Observed: fmt.Sprintf("steps=%d digest=%s", s2.Steps(), shortDigest(s2.Digest())),
-			Expected: fmt.Sprintf("steps=%d digest=%s", s.Steps(), shortDigest(s.Digest())),
+			Observed: fmt.Sprintf("steps=%d time=%s digest=%s", s2.Steps(), s2.Now(), shortDigest(s2.Digest())),
+			Expected: fmt.Sprintf("steps=%d time=%s digest=%s", s.Steps(), s.Now(), shortDigest(s.Digest())),
 			Pass:     detOK,
 		})
-		res := buildResult(suite.Name, seed, s, summary, story, strings.TrimSpace(string(llAdapter.Last())), snap, csvOutDir, promOutPath)
 		if !detOK {
 			return res, errors.New("scenario: nondeterministic replay detected (digest/steps/time mismatch)")
 		}
-		if !story.Passed() {
-			return res, errors.New("scenario: one or more verdict checks failed")
-		}
-		return res, nil
 	}
 
-	res := buildResult(suite.Name, seed, s, summary, story, strings.TrimSpace(string(llAdapter.Last())), snap, csvOutDir, promOutPath)
-	if !story.Passed() {
+	if !res.Story.Passed() {
 		return res, errors.New("scenario: one or more verdict checks failed")
 	}
 	return res, nil

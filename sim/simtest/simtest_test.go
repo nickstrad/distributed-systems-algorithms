@@ -277,7 +277,7 @@ func TestReportFormatting(t *testing.T) {
 		fmt.Sprintf("trace (showing 40 of %d):", s.TraceLen()),
 		"entry-55",
 		"panic stack:",
-		"REPLAY: go test ./... -run '^TestExample$/^seed=77$' -seed=77 -count=1",
+		"REPLAY: DST_SEED=77 go test ./... -run '^TestExample$/^seed=77$' -count=1",
 	}
 	for _, want := range checks {
 		if !strings.Contains(out, want) {
@@ -290,6 +290,11 @@ func TestReportFormatting(t *testing.T) {
 
 	// Verify Report logs cleanly without panicking.
 	Report(t, s, wrapped)
+
+	quoted := formatReport("TestExample/can't", s, wrapped)
+	if !strings.Contains(quoted, `-run '^TestExample$/^can'"'"'t$'`) {
+		t.Errorf("report did not shell-quote subtest name:\n%s", quoted)
+	}
 }
 
 func TestReportNilSim(t *testing.T) {
@@ -305,7 +310,7 @@ func TestReportNilSim(t *testing.T) {
 		"seed=19",
 		"sim=<nil>",
 		"panic stack:",
-		"REPLAY: go test ./... -run '^TestNilSim$' -seed=19 -count=1",
+		"REPLAY: DST_SEED=19 go test ./... -run '^TestNilSim$' -count=1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("nil-sim report missing %q\n%s", want, out)
@@ -318,7 +323,7 @@ func TestReportNilSim(t *testing.T) {
 		Seed: 23,
 	}
 	outIE := formatReport("", nil, ie)
-	if !strings.Contains(outIE, "seed=23") || !strings.Contains(outIE, "-run '.' -seed=23 -count=1") {
+	if !strings.Contains(outIE, "seed=23") || !strings.Contains(outIE, "REPLAY: DST_SEED=23 go test ./... -run '.' -count=1") {
 		t.Errorf("unexpected nil-sim InvariantError report:\n%s", outIE)
 	}
 }
@@ -384,7 +389,7 @@ func TestSubprocessCLIAndFailurePaths(t *testing.T) {
 		}
 		for _, want := range []string{
 			"nondeterministic replay for seed=11",
-			"REPLAY: go test ./... -run '^TestHelperModes$' -seed=11 -count=1",
+			"REPLAY: DST_SEED=11 go test ./... -run '^TestHelperModes$' -count=1",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("expected %q in output, got:\n%s", want, out)
@@ -400,7 +405,7 @@ func TestSubprocessCLIAndFailurePaths(t *testing.T) {
 		for _, want := range []string{
 			"panic stack:",
 			"sim: panic",
-			"REPLAY: go test ./... -run '^TestHelperModes$' -seed=13 -count=1",
+			"REPLAY: DST_SEED=13 go test ./... -run '^TestHelperModes$' -count=1",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("expected %q in output, got:\n%s", want, out)

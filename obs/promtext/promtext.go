@@ -8,6 +8,7 @@ package promtext
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -56,15 +57,22 @@ func New(prefix string, w io.Writer) *Adapter {
 // Name returns AdapterName ("prom").
 func (a *Adapter) Name() string { return AdapterName }
 
-// Export renders s, atomically swaps the cached scrape payload, and writes to w if set.
+// Export renders s, atomically swaps the cached scrape payload, and writes to w
+// if set. The cache advances even if the optional stream write fails.
 func (a *Adapter) Export(s obs.Snapshot) error {
 	body := Render(a.prefix, s)
 	a.latest.Store(&body)
 	if a.w == nil {
 		return nil
 	}
-	_, err := a.w.Write(body)
-	return err
+	n, err := a.w.Write(body)
+	if err == nil && n != len(body) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return fmt.Errorf("promtext: write snapshot %d for %q: %w", s.Seq, s.Instance, err)
+	}
+	return nil
 }
 
 // Last returns the most recently rendered Prometheus exposition bytes, or nil.
